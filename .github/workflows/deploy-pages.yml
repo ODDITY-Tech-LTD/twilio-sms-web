@@ -1,0 +1,96 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find latest semver tag
+        id: latest-tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: tags } = await github.rest.repos.listTags({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            const semverTags = tags
+              .map(t => t.name)
+              .filter(name => /^v\d+\.\d+\.\d+(-.*)?$/.test(name));
+
+            semverTags.sort((a, b) => {
+              const parse = v => {
+                const [, major, minor, patch, pre] = v.match(/^v(\d+)\.(\d+)\.(\d+)(-.*)?$/);
+                return { major: +major, minor: +minor, patch: +patch, pre: pre || '' };
+              };
+              const pa = parse(a), pb = parse(b);
+              if (pa.major !== pb.major) return pb.major - pa.major;
+              if (pa.minor !== pb.minor) return pb.minor - pa.minor;
+              if (pa.patch !== pb.patch) return pb.patch - pa.patch;
+              if (!pa.pre && pb.pre) return -1;
+              if (pa.pre && !pb.pre) return 1;
+              return pa.pre < pb.pre ? 1 : pa.pre > pb.pre ? -1 : 0;
+            });
+
+            const latest = semverTags[0];
+            core.info(`Latest semver tag: ${latest}`);
+            core.info(`Triggered tag: ${context.ref}`);
+
+            if (`refs/tags/${latest}` !== context.ref) {
+              core.setFailed(`Pushed tag ${context.ref} is not the latest semver tag (${latest}). Skipping deploy.`);
+              return;
+            }
+
+            core.setOutput('tag', latest);
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.latest-tag.outputs.tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
